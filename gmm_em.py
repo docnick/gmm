@@ -9,11 +9,6 @@ logging.basicConfig(#filename='example.log',
                     datefmt='%m/%d/%Y %I:%M:%S %p',
                     level=logging.DEBUG)
 
-# TODO: implement variational inference
-# TODO: create a notebook to provide more background material / equations etc.
-# TODO: flesh out readme (requirements, how to run, what's included, etc.)
-# TODO: check-in to repo
-
 np.random.seed(seed=42)
 EPS = 1e-6
 
@@ -221,7 +216,7 @@ if __name__ == '__main__':
     # generate sample data
     K = 3
 
-    clusters, true_mus, true_vars = generate_clusters(K)
+    clusters, true_mus, true_vars = generate_clusters(K, samples_per_cluster=100)
     X = torch.cat(clusters)
 
     m, k = X.size()

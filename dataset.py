@@ -25,7 +25,7 @@ def plot_2d_sample(sample):
     plt.show()
 
 
-def _sample_normals(mu, var, samples=CLUST_SAMPLES):
+def _sample_normals(mu, var, samples):
     out = [torch.normal(mu, var.sqrt()) for i in range(samples)]
     return torch.stack(out, dim=0)
 
@@ -43,12 +43,12 @@ def _generate_cluster_parameters(num_clusters, dims):
     return cluster_means, cluster_vars
 
 
-def generate_clusters(num_clusters, dims=DIMS):
+def generate_clusters(num_clusters, samples_per_cluster=CLUST_SAMPLES, dims=DIMS):
     mus, vars = _generate_cluster_parameters(num_clusters, dims)
     clusters = []
 
     for i in range(num_clusters):
-        samples = _sample_normals(mus[i, :], vars[i, :])
+        samples = _sample_normals(mus[i, :], vars[i, :], samples_per_cluster)
         clusters.append(samples)
 
     return clusters, mus, vars
