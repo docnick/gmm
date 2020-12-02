@@ -9,7 +9,7 @@ logging.basicConfig(  # filename='example.log',
     datefmt='%m/%d/%Y %I:%M:%S %p',
     level=logging.DEBUG)
 
-torch.manual_seed(123)
+# torch.manual_seed(123)
 np.random.seed(seed=42)
 
 EPS = torch.tensor([1e-6])
@@ -94,7 +94,7 @@ class VariationalGMM:
             assert not any(torch.isnan(xbar_k)), "X_bar is NaN, n_k[{}] = {}".format(k, n_k[k])
 
             # empirical variance for each cluster mean
-            self._gmm_W[k, :, :] = torch.eye(d) + \
+            self._gmm_W[k, :, :] = 4 * torch.eye(d) + \
                                    torch.matmul(self._gmm_z[:, k] * torch.transpose((self._data - xbar_k), 0, 1),
                                                 self._data - xbar_k)
             det = torch.det(self._gmm_W[k, :, :])
@@ -102,18 +102,12 @@ class VariationalGMM:
                 print("uh-oh")
             # assert det >= 0, "W is not positive-definite: {}".format(det)
 
-            # Take inverse of covariance matrix
-            # self._gmm_W[k, :, :] = torch.inverse(self._gmm_W[k, :, :])
-
             # degrees of freedom for the wishart distribution
             self._gmm_v[k] = d + n_k[k]
 
             # distribution over mu (mean of cluster centroids)
             self._gmm_kappa[k] = 1 + n_k[k]
             self._gmm_m[k] = (torch.Tensor([1, 1]) + (self._gmm_z[:, k] @ self._data)) / self._gmm_kappa[k]
-
-        logging.debug("means")
-        logging.debug(self._gmm_m)
 
     def maximization_step(self):
         """
@@ -129,10 +123,7 @@ class VariationalGMM:
 
         for k in range(self._k):
             # check that covariance matrix is positive definite, if not, something went wrong!
-            det = torch.det(self._gmm_W[k, :, :])
-            if torch.isnan(det) or det < 0:
-                print("uh-oh")
-
+            det = torch.det(torch.inverse(self._gmm_W[k, :, :]))
             assert det >= 0, "W is not positive-definite!"
 
             # E[log pi_k] ...
@@ -154,11 +145,10 @@ class VariationalGMM:
                 t1 = (-0.5) * d / self._gmm_kappa[k]
                 t2 = (self._gmm_v[k] * (self._data[i, :].view(1, d) - self._gmm_m[k, :].view(1, d)))
                 t3 = self._data[i, :].view(d, 1) - self._gmm_m[k, :].view(d, 1)
-                e_gauss_k[i] = t1 + t2 @ self._gmm_W[k, :, :] @ t3
+                e_gauss_k[i] = t1 + t2 @ torch.inverse(self._gmm_W[k, :, :]) @ t3
 
             rho_star[:, k] = e_pi_k + 0.5 * e_psi_k - (d / 2.) * LOG2PI - 0.5 * e_gauss_k.view(n)
 
-        # TODO: fix issue with properly normalizing Z
         # normalize rho into expectation of z
         z_exp_sum = torch.logsumexp(rho_star, dim=1).view(n, 1)
         assert not any(torch.isnan(z_exp_sum)), "NaN in summing Z"
@@ -173,16 +163,16 @@ class VariationalGMM:
         while not em_converged:
 
             #
-            # Maximization
-            #
-            # maximize parameters given expectations of pis
-            self.maximization_step()
-
-            #
             # Expectation
             #
             # set pis to expected values based on current parameters
             self.expectation_step()
+
+            #
+            # Maximization
+            #
+            # maximize parameters given expectations of pis
+            self.maximization_step()
 
             # # Compute log likelihood of the model to see how we're doing.
             # # This should decrease over time.
@@ -205,6 +195,11 @@ class VariationalGMM:
             if iters % 1 == 0:
                 logging.debug("MU")
                 logging.debug(self._gmm_m)
+
+                n_k = torch.sum(self._gmm_z, dim=0).view(self._k, 1)
+                logging.debug("N[k] = {}".format(n_k))
+
+                logging.debug("COV")
                 logging.debug(self._gmm_W)
 
             if iters > max_iters:
@@ -254,7 +249,7 @@ if __name__ == '__main__':
     K = 3
 
     # clusters, true_mus, true_vars = generate_clusters(K, 10)
-    clusters, true_mus, true_vars = generate_default_clusters(samples_per_cluster=10)
+    clusters, true_mus, true_vars = generate_default_clusters(samples_per_cluster=50)
     X = torch.cat(clusters)
 
     m, d = X.size()
