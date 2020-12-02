@@ -54,19 +54,8 @@ def generate_clusters(num_clusters, samples_per_cluster=CLUST_SAMPLES, dims=DIMS
     return clusters, mus, vars
 
 
-def generate_default_clusters():
-    cluster1 = _sample_normals(
-        MUS[0, :],
-        VARS[0, :]
-    )
-
-    cluster2 = _sample_normals(
-        MUS[1, :],
-        VARS[1, :]
-    )
-
-    cluster3 = _sample_normals(
-        MUS[2, :],
-        VARS[2, :]
-    )
+def generate_default_clusters(samples_per_cluster=CLUST_SAMPLES):
+    cluster1 = _sample_normals(MUS[0, :], VARS[0, :], samples_per_cluster)
+    cluster2 = _sample_normals(MUS[1, :], VARS[1, :], samples_per_cluster)
+    cluster3 = _sample_normals(MUS[2, :], VARS[2, :], samples_per_cluster)
     return [cluster1, cluster2, cluster3], MUS, VARS
