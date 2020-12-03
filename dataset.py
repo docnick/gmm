@@ -1,4 +1,5 @@
 import torch
+import pickle
 import matplotlib.pyplot as plt
 
 DIMS = 2
@@ -59,3 +60,17 @@ def generate_default_clusters(samples_per_cluster=CLUST_SAMPLES):
     cluster2 = _sample_normals(MUS[1, :], VARS[1, :], samples_per_cluster)
     cluster3 = _sample_normals(MUS[2, :], VARS[2, :], samples_per_cluster)
     return [cluster1, cluster2, cluster3], MUS, VARS
+
+
+def save_data_to_file(clusters, mus, vars, file_name):
+
+    with open(file_name, 'wb') as fout:
+        pickle.dump([clusters, mus, vars], fout)
+
+
+def load_data_from_file(file_name):
+
+    with open(file_name, 'rb') as fin:
+        [clusters, mus, vars] = pickle.load(fin)
+
+    return clusters, mus, vars
