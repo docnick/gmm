@@ -1,8 +1,10 @@
 import logging
 import torch
 import numpy as np
-# from torch.distributions import multivariate_normal
-from dataset import generate_clusters, generate_default_clusters
+from dataset import generate_clusters, \
+                    generate_default_clusters, \
+                    save_data_to_file, \
+                    load_data_from_file
 
 logging.basicConfig(  # filename='example.log',
     format='%(asctime)s %(message)s',
@@ -17,17 +19,25 @@ LOG2 = torch.log(torch.tensor([2.]))
 LOG2PI = torch.log(torch.tensor([2. * np.pi]))
 
 
-# TODO: Implement ELBO and verify we maximize on each iteration
-# TODO: make priors explicit in class definition (currently they are just hardcoded in update equations)
-# TODO: clean up comments
-# TODO: better logging
-# TODO: cleanup asserts, verify correctness
+#
+# This code is mostly pieced together from the following resources:
+# * https://haziqj.ml/files/ubd-bgtvi.pdf
+# * https://www.doc.ic.ac.uk/~dfg/ProbabilisticInference/IDAPISlides17_18.pdf
+# * http://www.cs.uoi.gr/~arly/papers/SPM08.pdf
+#
 
 class VariationalGMM:
 
     def __init__(self, data, k):
         self._data = data
         self._k = k
+
+        # priors
+        self._gmm_alpha0 = 1
+        self._gmm_W0 = 4 * torch.eye(d)
+        self._gmm_kappa0 = 1
+        self._gmm_m0 = torch.Tensor([1, 1])
+        self._gmm_v0 = data.size()[1]  # dimensionality of the data
 
         # model parameters, these get initialized for real in the function below
         self._gmm_alpha = None
@@ -51,21 +61,21 @@ class VariationalGMM:
         #
 
         # variational param for pi (dirichlet)
-        self._gmm_alpha = torch.ones(self._k, 1)
-        # self._gmm_alpha = torch.rand(self._k, 1)
-        # self._gmm_alpha /= torch.sum(self._gmm_alpha)
+        self._gmm_alpha = torch.ones(self._k, self._gmm_alpha0)
 
         # variational parameters for mu (normal)
+        # pick one of the data points at random and assign as a cluster centroid
         idxs = torch.from_numpy(np.random.choice(m, self._k, replace=False))
         self._gmm_m = self._data[idxs]
-        self._gmm_kappa = torch.ones(self._k, 1)
+        self._gmm_kappa = torch.ones(self._k, self._gmm_kappa0)
 
         # variational parameters for variance (wishart)
         self._gmm_W = torch.zeros(self._k, d, d)
         for k in range(self._k):
-            self._gmm_W[k, :, :] = torch.eye(d)
-        self._gmm_v = torch.ones(self._k, 1) * d
+            self._gmm_W[k, :, :] = self._gmm_W0
+        self._gmm_v = torch.ones(self._k, 1) * self._gmm_v0
 
+        # random initialization for cluster ownership
         self._gmm_z = torch.rand(m, self._k)
         self._gmm_z = self._gmm_z / torch.sum(self._gmm_z, dim=1).view(m, 1)
 
@@ -81,6 +91,9 @@ class VariationalGMM:
         # https://github.com/bertini36/GMM/blob/58bb1856115d54b470dd48bc7a9f78ff86304232/inference/autograd/gmm_gavi.py#L183
         n, dim = self._data.size()
 
+        # TODO:elbo does not strictly decrease, it's pretty close, but I'm missing a few terms
+        # I think I need to sit down and work through the full derivation to work out the form of the expectations and
+        # entropies, but I just haven't yet
         e_log_like = torch.zeros(self._k, 1)
         e_log_psi = torch.zeros(self._k, 1)
         e_log_pi = torch.zeros(self._k, 1)
@@ -90,28 +103,30 @@ class VariationalGMM:
 
         for k in range(self._k):
             e_log_like[k] = torch.sum(self._expectation_log_like(k))
-            e_log_psi[k] = self._expectation_log_psi(k)
-            e_log_pi[k] = self._expectation_log_pi(k, dim)
+            e_log_psi[k] = self._expectation_log_psi(k, dim)
+            e_log_pi[k] = self._expectation_log_pi(k)
 
-            # entropy terms
+            # entropy of normal
             q_mu_entropy[k] = (dim / 2) * np.log(2 * np.pi * np.e) + 0.5 * torch.log(torch.det(self._gmm_W[k, :, :]))
 
+        # entropy of Z
         for i in range(n):
-            q_pi_entropy[i] = torch.sum(self._gmm_z[i, :] * torch.log(self._gmm_z[i, :]))
+            q_pi_entropy[i] = self._gmm_z[i, :] @ torch.log(self._gmm_z[i, :])
 
-        elbo = torch.sum(e_log_like) + torch.sum(e_log_psi) + torch.sum(e_log_pi) - torch.sum(q_mu_entropy) - torch.sum(q_pi_entropy)
+        # I took out the psi term for now
+        elbo = torch.sum(e_log_like) + torch.sum(e_log_pi) - torch.sum(q_mu_entropy) - torch.sum(q_pi_entropy)
 
         logging.debug("ELBO: sum(e_log_like)   = {}".format(torch.sum(e_log_like)))
         logging.debug("ELBO: sum(e_log_psi)    = {}".format(torch.sum(e_log_psi)))
         logging.debug("ELBO: sum(e_log_pi)     = {}".format(torch.sum(e_log_pi)))
         logging.debug("ELBO: sum(q_mu_entropy) = {}".format(torch.sum(q_mu_entropy)))
         logging.debug("ELBO: sum(q_pi_entropy) = {}".format(torch.sum(q_pi_entropy)))
-        logging.debug("ELBO = {}".format(elbo))
+        logging.info("ELBO = {}".format(elbo))
         return elbo
 
     def _expectation_log_like(self, k):
         """
-        Computation of E_q[(x-mu)^t * psi * (x - mu)]
+        Computation of E_q[p(x | z, mu, sig)]
         """
 
         n, dim = self._data.size()
@@ -121,8 +136,8 @@ class VariationalGMM:
             # break up terms to help with debugging
             t1 = (-0.5) * d * torch.log(2 * np.pi * torch.det(self._gmm_W[k, :, :])) * self._gmm_z[i, k]
 
-            weighted_mean_diff = self._gmm_z[i, k] * (self._data[i, :] - self._gmm_m[k, :])
-            t2 = weighted_mean_diff.view(1, dim) @ torch.inverse(self._gmm_W[k, :, :]) @ (self._data[i, :] - self._gmm_m[k, :]).view(dim, 1)
+            t2 = (self._gmm_z[i, k] * (self._data[i, :] - self._gmm_m[k, :])).view(1, dim) @ \
+                 torch.inverse(self._gmm_W[k, :, :]) @ (self._data[i, :] - self._gmm_m[k, :]).view(dim, 1)
             e_gauss_k[i] = t1 - t2
 
         return e_gauss_k
@@ -143,7 +158,7 @@ class VariationalGMM:
         n_k = torch.sum(self._gmm_z, dim=0).view(num_clusters, 1)
 
         # distribution over pi (cluster weight) which is a dirichlet
-        self._gmm_alpha += n_k
+        self._gmm_alpha = self._gmm_alpha0 + n_k
 
         for k in range(self._k):
             # distribution over psi (variance of cluster means)
@@ -152,20 +167,18 @@ class VariationalGMM:
             assert not any(torch.isnan(xbar_k)), "X_bar is NaN, n_k[{}] = {}".format(k, n_k[k])
 
             # empirical variance for each cluster mean
-            self._gmm_W[k, :, :] = 4 * torch.eye(d) + \
+            self._gmm_W[k, :, :] = self._gmm_W0 + \
                                    torch.matmul(self._gmm_z[:, k] * torch.transpose((self._data - xbar_k), 0, 1),
                                                 self._data - xbar_k)
             det = torch.det(self._gmm_W[k, :, :])
-            if any(torch.isnan(self._gmm_W[k, :, :].flatten())) or torch.isnan(det) or det < 0:
-                print("uh-oh")
-            # assert det >= 0, "W is not positive-definite: {}".format(det)
+            assert det >= 0, "W is not positive-definite: {}".format(det)
 
             # degrees of freedom for the wishart distribution
-            self._gmm_v[k] = d + n_k[k]
+            self._gmm_v[k] = self._gmm_v0 + n_k[k]
 
             # distribution over mu (mean of cluster centroids)
-            self._gmm_kappa[k] = 1 + n_k[k]
-            self._gmm_m[k] = (torch.Tensor([1, 1]) + (self._gmm_z[:, k] @ self._data)) / self._gmm_kappa[k]
+            self._gmm_kappa[k] = self._gmm_kappa0 + n_k[k]
+            self._gmm_m[k] = (self._gmm_kappa0 * self._gmm_m0 + (self._gmm_z[:, k] @ self._data)) / self._gmm_kappa[k]
 
     def expectation_step(self):
         """
@@ -184,27 +197,13 @@ class VariationalGMM:
             det = torch.det(torch.inverse(self._gmm_W[k, :, :]))
             assert det >= 0, "W is not positive-definite!"
 
-            # E[log pi_k] ...
-            e_pi_k = d * LOG2 + torch.log(det)
-            for j in range(d):
-                e_pi_k += torch.digamma((self._gmm_v[k] + 1 - j) / 2)
-
             # E[log | psi_k |]...
-            e_psi_k = torch.digamma(self._gmm_alpha[k]) - torch.digamma(torch.sum(self._gmm_alpha))
+            e_psi_k = self._expectation_log_psi(k, d)
 
-            # E[(x_i - mu_k)^T * psi_k * (x_i - mu_k)] -> dimension should be n x 1
-            # e_gauss_k1 = (-0.5) * d / self._gmm_kappa[k] + \
-            #             torch.matmul(self._gmm_v[k] * (self._data - self._gmm_m[k, :]), self._gmm_W[k, :, :]) * \
-            #             (self._data - self._gmm_m[k, :])
+            # E[log pi_k] ...
+            e_pi_k = self._expectation_log_pi(k)
 
-            e_gauss_k = torch.zeros(n, 1)
-            for i in range(n):
-                # break up terms to help with debugging
-                t1 = (-0.5) * d / self._gmm_kappa[k]
-                t2 = (self._gmm_v[k] * (self._data[i, :].view(1, d) - self._gmm_m[k, :].view(1, d)))
-                t3 = self._data[i, :].view(d, 1) - self._gmm_m[k, :].view(d, 1)
-                e_gauss_k[i] = t1 + t2 @ torch.inverse(self._gmm_W[k, :, :]) @ t3
-
+            e_gauss_k = self._expectation_log_mu(k)
             rho_star[:, k] = e_pi_k + 0.5 * e_psi_k - (d / 2.) * LOG2PI - 0.5 * e_gauss_k.view(n)
 
         # normalize rho into expectation of z
@@ -213,10 +212,10 @@ class VariationalGMM:
         self._gmm_z = _smooth(torch.exp(rho_star - z_exp_sum))
         assert torch.abs(torch.sum(self._gmm_z) - n) < 0.01, "Z's are not normalized"
 
-    # TODO use these function calls in maximization step
     def _expectation_log_mu(self, k):
         """
         Computation of E_q[(x-mu)^t * psi * (x - mu)]
+        See slide 25: https://haziqj.ml/files/ubd-bgtvi.pdf
         """
 
         n, dim = self._data.size()
@@ -231,26 +230,27 @@ class VariationalGMM:
 
         return e_gauss_k
 
-    def _expectation_log_pi(self, k, data_dims):
+    def _expectation_log_psi(self, k, data_dims):
         """
-        Computation of E_q[log pi_k]
+        Computation of E_q [ log | psi_k| ]
         """
         det = torch.det(torch.inverse(self._gmm_W[k, :, :]))
         assert det >= 0, "W is not positive-definite!"
 
-        # E[log pi_k] ...
-        e_pi_k = d * LOG2 + torch.log(det)
+        # E[log psi_k] ...
+        e_psi_k = d * LOG2 + torch.log(det)
         for j in range(data_dims):
-            e_pi_k += torch.digamma((self._gmm_v[k] + 1 - j) / 2)
+            e_psi_k += torch.digamma((self._gmm_v[k] + 1 - j) / 2)
 
-        return e_pi_k
-
-    def _expectation_log_psi(self, k):
-        """
-        Computation of E_q [ log | psi_k| ]
-        """
-        e_psi_k = torch.digamma(self._gmm_alpha[k]) - torch.digamma(torch.sum(self._gmm_alpha))
         return e_psi_k
+
+    def _expectation_log_pi(self, k):
+        """
+        Computation of E_q[log pi_k]
+        Dirichlet expectation
+        """
+        e_pi_k = torch.digamma(self._gmm_alpha[k]) - torch.digamma(torch.sum(self._gmm_alpha))
+        return e_pi_k
 
     def expectation_maximization(self, max_iters=1000, converge_thresh=1e-3):
         is_converged = False
@@ -283,16 +283,9 @@ class VariationalGMM:
             elbos.append(elbo)
 
             iters += 1
-            logging.debug("Variational Inference iteration[{}], ELBO = {}".format(iters, elbo))
             if iters % 2 == 0:
                 logging.debug("MU")
                 logging.debug(self._gmm_m)
-
-                # n_k = torch.sum(self._gmm_z, dim=0).view(self._k, 1)
-                # logging.debug("N[k] = {}".format(n_k))
-                #
-                # logging.debug("COV")
-                # logging.debug(self._gmm_W)
 
             if iters > max_iters:
                 logging.debug('Breaking because we hit {} iterations'.format(max_iters))
@@ -302,46 +295,25 @@ class VariationalGMM:
 
 
 def _smooth(probs, eps=EPS):
-    probs += eps
-    probs = probs / torch.sum(probs, dim=1).view(probs.size()[0], 1)
-    return probs
-
-
-def _distance(x1, x2):
-    # compute euclidean distance between 2 data points
-    return torch.sqrt(torch.sum((x1 - x2) ** 2))
-
-
-def degenerative_check(mus, dist_thresh=0.5):
-    """
-    Identify cases where our clusters start to converge and try to perturb one of the means to help
-    the model find the correct clusters.
-
-    Note: this has not shown to work very well yet, still needs some work
-    :param mus:
-    :param dist_thresh:
-    :return:
-    """
-    for i in range(mus.size(0)):
-        for j in range(i + 1, mus.size(0)):
-            dist = _distance(mus[i, :], mus[j, :])
-            if dist <= dist_thresh:
-                logging.debug("distance[{}, {}] = {}".format(i, j, dist))
-                old_mu_j = mus[j, :].clone()
-                # randomly perturb cluster centroid
-                mus[j, :] += torch.randn(mus[j, :].size())
-                logging.info(
-                    "degenerative cluster centroids found, randomly perturbing cluster ({}) -> ({})".format(old_mu_j,
-                                                                                                            mus[j, :]))
-    return mus
+    # add a small value to each element of the probability distribution and re-normalize to smooth
+    # (and avoid divide by 0 errors)
+    smoothed_probs = probs + eps
+    smoothed_probs /= torch.sum(smoothed_probs, dim=1).view(probs.size()[0], 1)
+    return smoothed_probs
 
 
 if __name__ == '__main__':
     # generate sample data
     K = 3
 
+    file_name = 'last_dataset.pckl'
     # clusters, true_mus, true_vars = generate_clusters(K, 10)
-    clusters, true_mus, true_vars = generate_default_clusters(samples_per_cluster=50)
+    if False:
+        clusters, true_mus, true_vars = load_data_from_file(file_name)
+    else:
+        clusters, true_mus, true_vars = generate_default_clusters(samples_per_cluster=100)
+        save_data_to_file(clusters, true_mus, true_vars, file_name)
+
     X = torch.cat(clusters)
 
     m, d = X.size()
@@ -363,5 +335,3 @@ if __name__ == '__main__':
     print(var_star)
     print("----\n ")
     print(torch.max(z_star, dim=1))
-    for z in z_star:
-        print(z)
