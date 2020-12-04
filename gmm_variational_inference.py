@@ -18,6 +18,7 @@ EPS = torch.tensor([1e-6])
 LOG2 = torch.log(torch.tensor([2.]))
 LOG2PI = torch.log(torch.tensor([2. * np.pi]))
 
+# TODO: need to figure out what's going on with the variances
 
 #
 # This code is mostly pieced together from the following resources:
@@ -134,7 +135,7 @@ class VariationalGMM:
 
         for i in range(n):
             # break up terms to help with debugging
-            t1 = (-0.5) * d * torch.log(2 * np.pi * torch.det(self._gmm_W[k, :, :])) * self._gmm_z[i, k]
+            t1 = (-0.5) * d * torch.log(2 * np.pi * torch.det(torch.inverse(self._gmm_W[k, :, :]))) * self._gmm_z[i, k]
 
             t2 = (self._gmm_z[i, k] * (self._data[i, :] - self._gmm_m[k, :])).view(1, dim) @ \
                  torch.inverse(self._gmm_W[k, :, :]) @ (self._data[i, :] - self._gmm_m[k, :]).view(dim, 1)
@@ -168,8 +169,8 @@ class VariationalGMM:
 
             # empirical variance for each cluster mean
             self._gmm_W[k, :, :] = self._gmm_W0 + \
-                                   torch.matmul(self._gmm_z[:, k] * torch.transpose((self._data - xbar_k), 0, 1),
-                                                self._data - xbar_k)
+                                   self._gmm_z[:, k] * torch.transpose((self._data - xbar_k), 0, 1) @ (
+                                               self._data - xbar_k)
             det = torch.det(self._gmm_W[k, :, :])
             assert det >= 0, "W is not positive-definite: {}".format(det)
 
@@ -291,7 +292,7 @@ class VariationalGMM:
                 logging.debug('Breaking because we hit {} iterations'.format(max_iters))
                 break
 
-        return self._gmm_m, self._gmm_W, self._gmm_z
+        return self._gmm_m, self._gmm_W, self._gmm_z, self._gmm_kappa, self._gmm_v
 
 
 def _smooth(probs, eps=EPS):
@@ -311,7 +312,7 @@ if __name__ == '__main__':
     if False:
         clusters, true_mus, true_vars = load_data_from_file(file_name)
     else:
-        clusters, true_mus, true_vars = generate_default_clusters(samples_per_cluster=100)
+        clusters, true_mus, true_vars = generate_default_clusters(samples_per_cluster=30)
         save_data_to_file(clusters, true_mus, true_vars, file_name)
 
     X = torch.cat(clusters)
@@ -320,7 +321,7 @@ if __name__ == '__main__':
     logging.debug("m = {}, d = {}".format(m, d))
 
     gmm = VariationalGMM(X, K)
-    mu_star, var_star, z_star = gmm.expectation_maximization(max_iters=100)
+    mu_star, var_star, z_star, kappa_star, v_star = gmm.expectation_maximization(max_iters=100)
 
     print("True parameters")
     print("Cluster means")
@@ -332,6 +333,12 @@ if __name__ == '__main__':
     print("Learned params:")
     print(mu_star)
     print("----\n ")
-    print(var_star)
+    for k in range(K):
+        print(var_star[k])
     print("----\n ")
+
+    print("kappa:")
+    print(kappa_star)
+    print("nu: ")
+    print(v_star)
     print(torch.max(z_star, dim=1))
